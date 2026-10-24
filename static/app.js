@@ -243,7 +243,7 @@ function setup() {
   $("#cam").onclick = ev => {
     if (photoOn) return;
     ev.preventDefault();
-    $("#confirm").innerHTML = `<p class="err">Photo reading is not switched on for this copy of the app yet. Type the problems below instead. (To turn it on, start the server with ANTHROPIC_API_KEY set.)</p>`;
+    $("#confirm").innerHTML = `<p class="err">Photo reading is not switched on for this copy of the app yet. Type the problems below instead. (To turn it on, add GEMINI_API_KEY, or ANTHROPIC_API_KEY, to the server settings and restart it.)</p>`;
   };
   $("#photoRow label").onclick = ev => { if (!photoOn) { ev.preventDefault(); $("#cam").click(); } };
   $("#cam").onchange = async ev => {

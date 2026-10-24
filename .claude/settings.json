@@ -7,7 +7,11 @@
       "Bash(git diff:*)",
       "Bash(git log:*)",
       "Bash(git show:*)",
-      "Bash(ls:*)"
+      "Bash(ls:*)",
+      "Bash(gh pr view:*)",
+      "Bash(gh issue view:*)",
+      "Bash(gh run list:*)",
+      "Bash(git branch:*)"
     ],
     "deny": [
       "Read(./.env)",
@@ -21,7 +25,10 @@
     "Stop": [
       {
         "hooks": [
-          { "type": "command", "command": "python3 -m pytest -q -x 2>&1 | tail -5" }
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/run-tests.sh"
+          }
         ]
       }
     ]

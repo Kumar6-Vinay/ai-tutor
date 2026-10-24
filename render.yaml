@@ -1,0 +1,18 @@
+# Render Blueprint: New > Blueprint > pick this repo. Then fill in the two secrets marked "sync: false".
+services:
+  - type: web
+    name: ai-tutor
+    runtime: docker
+    plan: starter            # a persistent disk needs a paid plan; free instances lose the database on restart
+    healthCheckPath: /api/health
+    disk:
+      name: tutor-data
+      mountPath: /data
+      sizeGB: 1
+    envVars:
+      - key: TUTOR_DB
+        value: /data/tutor.db
+      - key: GEMINI_API_KEY    # photo reading (Google AI Studio key). Leave empty to turn photos off.
+        sync: false
+      - key: TUTOR_ACCESS_CODE # family passcode. Set one before sharing the link.
+        sync: false

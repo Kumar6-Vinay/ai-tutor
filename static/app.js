@@ -164,6 +164,20 @@ function shrink(file, max = 1600) {
   });
 }
 
+/* ---------- passcode (only when the server has one) ---------- */
+function lockScreen() {
+  $("#controls").hidden = true; $("#stars").hidden = true;
+  stage.innerHTML = `${guideHTML("Hi! Please ask a grown-up for the passcode.", "neutral", "", "hello")}
+    <span class="grownup">👪 For the grown-up</span>
+    <label class="field">Family passcode<input id="code" type="password" autocomplete="current-password"></label>
+    <div class="err" id="err"></div><button class="primary" id="unlock" style="margin-top:10px">Open</button>`;
+  const go = async () => {
+    try { await api("POST", "/api/unlock", {code: $("#code").value}); render(); } catch (e) { showErr(e.message); }
+  };
+  $("#unlock").onclick = go;
+  $("#code").onkeydown = e => { if (e.key === "Enter") go(); };
+}
+
 /* ---------- screens: parent setup ---------- */
 function setup() {
   $("#controls").hidden = true; $("#stars").hidden = true;
@@ -194,7 +208,7 @@ function setup() {
       <label class="primary camera" for="cam">📷 Take a photo of the homework</label>
       <input type="file" id="cam" accept="image/*" capture="environment" hidden>
     </div>
-    <p class="sub" id="photoNote">The photo is sent once to Claude, an AI reader, to read the numbers. It is not saved. Please check what it read.</p>
+    <p class="sub" id="photoNote">The photo is sent once to an AI reader to read the numbers. It is not saved. Please check what it read.</p>
     <p class="sub">Or type the problems from ${esc(child.nickname)}'s sheet, for example: 52 − 27, 63 − 38, 71 − 46</p>
     <textarea id="ws" aria-label="Worksheet problems">52 - 27\n63 - 38\n71 - 46\n84 - 59\n92 - 35</textarea>
     <div class="row" style="margin-top:12px"><button class="soft" id="read">Check problems</button>
@@ -221,7 +235,11 @@ function setup() {
 
   /* phone camera: shrink the photo in the browser, then send it for reading */
   let photoOn = true;
-  api("GET", "/api/health").then(h => { photoOn = !!h.photo; }).catch(() => {});
+  api("GET", "/api/health").then(h => {
+    photoOn = !!h.photo;
+    if (h.photo && h.provider) $("#photoNote").textContent = `The photo is sent once to ${h.provider}, an AI reader, to read the numbers. It is not saved. Please check what it read.` +
+      (h.provider === "Gemini" ? " On Google's free tier, Google may use what you send to improve its products, so avoid photos showing names or faces." : "");
+  }).catch(() => {});
   $("#cam").onclick = ev => {
     if (photoOn) return;
     ev.preventDefault();
@@ -483,5 +501,5 @@ tv.onclick = () => {
 };
 $("#tgRestart").onclick = () => { sid = null; action = null; lastFb = null; try { speechSynthesis.cancel(); } catch (e) {} setup(); };
 
-render();
+api("GET", "/api/health").then(h => { if (h.locked && !h.unlocked) lockScreen(); else render(); }).catch(render);
 })();

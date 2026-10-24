@@ -1,14 +1,18 @@
 """HTTP API for the tutor MVP."""
 from __future__ import annotations
 
+import hashlib
+import hmac
 import os
 import re
+import time
+from collections import defaultdict, deque
 from pathlib import Path
 from typing import Literal, Optional
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
@@ -27,6 +31,51 @@ app = FastAPI(title="Class 1-3 Maths Tutor API", version="0.1.0")
 store = Store(os.environ.get("TUTOR_DB", "tutor.db"))
 phraser = get_phraser()
 vision = intake.get_extractor()
+
+
+# ---------- access gate and rate limits ----------
+# Optional passcode: set TUTOR_ACCESS_CODE and every /api call (except health and unlock) needs the cookie
+# that /api/unlock hands out. Unset, the app is open (local use).
+def _token(code: str) -> str:
+    return hmac.new(code.encode(), b"tutor-access", hashlib.sha256).hexdigest()
+
+
+def _unlocked(request: Request) -> bool:
+    code = os.environ.get("TUTOR_ACCESS_CODE")
+    return not code or hmac.compare_digest(request.cookies.get("tutor_access", ""), _token(code))
+
+
+class Limiter:
+    def __init__(self) -> None:
+        self.hits: dict[str, deque] = defaultdict(deque)
+
+    def allow(self, key: str, n: int, window: float) -> bool:
+        q, now = self.hits[key], time.time()
+        while q and now - q[0] > window:
+            q.popleft()
+        if len(q) >= n:
+            return False
+        q.append(now)
+        return True
+
+
+limiter = Limiter()
+PHOTOS_PER_HOUR = int(os.environ.get("TUTOR_PHOTOS_PER_HOUR", "10"))      # per visitor
+PHOTOS_PER_HOUR_ALL = int(os.environ.get("TUTOR_PHOTOS_PER_HOUR_ALL", "60"))  # whole app: protects a free quota
+
+
+def _who(request: Request) -> str:
+    fwd = request.headers.get("x-forwarded-for", "")
+    # the last entry is the one our own proxy added; earlier ones can be forged by the visitor
+    return fwd.split(",")[-1].strip() or (request.client.host if request.client else "?")
+
+
+@app.middleware("http")
+async def gate(request: Request, call_next):
+    if request.url.path.startswith("/api/") and request.url.path not in ("/api/health", "/api/unlock") \
+            and not _unlocked(request):
+        return JSONResponse({"detail": "Passcode needed"}, status_code=401)
+    return await call_next(request)
 
 
 # ---------- schemas ----------
@@ -104,9 +153,28 @@ def _view(s: Session) -> dict:
 
 
 # ---------- routes ----------
+class UnlockIn(BaseModel):
+    code: str = Field(max_length=100)
+
+
+@app.post("/api/unlock")
+def unlock(body: UnlockIn, request: Request, response: Response) -> dict:
+    code = os.environ.get("TUTOR_ACCESS_CODE")
+    if not code:
+        return {"ok": True}
+    if not limiter.allow("unlock:" + _who(request), 10, 600):
+        raise HTTPException(429, "Too many tries. Wait a few minutes.")
+    if not hmac.compare_digest(body.code.encode(), code.encode()):
+        raise HTTPException(401, "That passcode is not right")
+    response.set_cookie("tutor_access", _token(code), httponly=True, samesite="lax", max_age=60 * 60 * 24 * 30,
+                        secure=request.headers.get("x-forwarded-proto") == "https")
+    return {"ok": True}
+
+
 @app.get("/api/health")
-def health() -> dict:
-    return {"ok": True, "photo": getattr(vision, "configured", True)}
+def health(request: Request) -> dict:
+    return {"ok": True, "photo": getattr(vision, "configured", True), "provider": getattr(vision, "provider", ""),
+            "locked": bool(os.environ.get("TUTOR_ACCESS_CODE")), "unlocked": _unlocked(request)}
 
 
 @app.post("/api/children", status_code=201)
@@ -158,6 +226,8 @@ async def parse_photo(request: Request) -> dict:
     """Body is the raw image. The photo is read once and never stored."""
     if not getattr(vision, "configured", True):
         raise HTTPException(501, "Photo reading is not connected yet. Type the problems instead.")
+    if not (limiter.allow("photo:" + _who(request), PHOTOS_PER_HOUR, 3600) and limiter.allow("photo:all", PHOTOS_PER_HOUR_ALL, 3600)):
+        raise HTTPException(429, "That's a lot of photos for now. Please type the problems, or try again later.")
     data = await request.body()
     if not data:
         raise HTTPException(400, "No photo received")

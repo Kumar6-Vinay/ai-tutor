@@ -12,7 +12,7 @@ changes any number or fails the safety check, the original line is used.
 ```bash
 pip install -r requirements-dev.txt
 uvicorn app.main:app --reload        # http://127.0.0.1:8000
-pytest -q                            # 54 tests
+pytest -q                            # 60 tests
 ```
 
 Docker: `docker build -t tutor . && docker run -p 8000:8000 -v tutor-data:/data tutor`
@@ -46,7 +46,8 @@ tests/               engine, learner model, policy, services, HTTP API
 | GET | `/api/children/{id}/progress` | Skill states, review dates, current observations. |
 | DELETE | `/api/children/{id}/observations/{skill}/{bug}` | Parent removes an observation they think is wrong. |
 | POST | `/api/worksheets/parse` | `{text}` → items, with out-of-scope items flagged for confirmation. |
-| POST | `/api/worksheets/photo` | Raw image body (JPEG/PNG/WebP, max 5 MB) → items with per-problem confidence. 501 unless `ANTHROPIC_API_KEY` is set. |
+| POST | `/api/worksheets/photo` | Raw image body (JPEG/PNG/WebP, max 5 MB) → items with per-problem confidence. 501 unless `GEMINI_API_KEY` or `ANTHROPIC_API_KEY` is set. Limited to 10 photos/hour per visitor, 60/hour overall. |
+| POST | `/api/unlock` | `{code}` → sets the access cookie when `TUTOR_ACCESS_CODE` is set. |
 | POST | `/api/sessions` | `{child_id, items}` → first action. |
 | POST | `/api/sessions/{id}/input` | `{kind: digit|regroup|help|stuck|break|continue|build|number, ...}` → feedback + next action. |
 | GET | `/api/sessions/{id}/report` | Parent report. |
@@ -56,14 +57,18 @@ The client never receives expected answers; it sends the child's input and rende
 ## Homework photo
 
 On a phone the parent taps "Take a photo of the homework". The browser shrinks the picture and sends it once to
-`/api/worksheets/photo`, which asks Claude (default `claude-sonnet-5-5`, override with `TUTOR_VISION_MODEL`) to
-fill a fixed `record_problems` tool, twice. The model never writes text the child sees. Problems the two passes
+`/api/worksheets/photo`, which asks a vision model to return a fixed list of problems, twice. Gemini (has a free
+tier) is used when `GEMINI_API_KEY` is set (default `gemini-2.5-flash`), otherwise Claude when `ANTHROPIC_API_KEY`
+is set (default `claude-sonnet-5-5`). Override with `TUTOR_VISION_MODEL`. The model never writes text the child sees. Problems the two passes
 disagree on, or that are low confidence, are marked "not sure" for the parent to check before anything starts.
 Exercises that are not simple sums are only counted, and left to the parent. Photos are not stored.
 
 ```bash
-export ANTHROPIC_API_KEY=...   # enables the camera button
+export GEMINI_API_KEY=...      # or ANTHROPIC_API_KEY=...  enables the camera button
 ```
+
+Note: on Google's free tier, Google may use submitted content to improve its products (check their current terms).
+Tell parents to avoid photos showing names or faces; the app says so on the photo screen.
 
 ## How the tutor makes sure the homework is learned
 
@@ -74,6 +79,16 @@ export ANTHROPIC_API_KEY=...   # enables the camera button
   Tilli shows another and checks again.
 - If time runs out (15 min for ages 5-7), unreached problems are listed as "saved for next time" in the parent report.
 - The parent report shows each homework problem as: solved alone, solved with help, watched, or saved.
+
+## Going live (Render)
+
+1. Push this repo to GitHub, then in Render choose **New > Blueprint** and pick it (`render.yaml` is read).
+2. Fill in the two secrets: `GEMINI_API_KEY` (from Google AI Studio) and `TUTOR_ACCESS_CODE` (a family passcode).
+3. Open the https link Render gives you. Enter the passcode once per device (30 days).
+
+The disk at `/data` keeps the database, so it needs a paid instance; free instances lose data on restart.
+With no `TUTOR_ACCESS_CODE` the app is open to anyone with the link: always set one before sharing it.
+There is still no parent login, only the shared passcode, and one SQLite file, so this suits a family, not a school.
 
 ## Optional LLM wording
 

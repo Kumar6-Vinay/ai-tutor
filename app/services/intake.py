@@ -82,39 +82,32 @@ def sniff_media_type(b: bytes) -> str | None:
     return None
 
 
-class ClaudeVisionExtractor:
-    """Reads a homework photo with Claude. The model may only fill the `record_problems` tool: its output is
+def _clean(problems: list, other) -> tuple[list[dict], int]:
+    """Whatever the model returned, keep only well-formed problems."""
+    out = []
+    for p in (problems or [])[:20]:
+        try:
+            a, b_, sign, conf = int(p["a"]), int(p["b"]), p["op"], float(p.get("confidence", 0.5))
+        except (KeyError, TypeError, ValueError, AttributeError):
+            continue
+        if sign not in ("+", "-") or not (0 <= a <= 999 and 0 <= b_ <= 999):
+            continue
+        out.append({"a": a, "b": b_, "op": sign, "confidence": max(0.0, min(1.0, conf))})
+    try:
+        return out, max(0, int(other or 0))
+    except (TypeError, ValueError):
+        return out, 0
+
+
+class _TwoPassExtractor:
+    """Reads a homework photo with a vision model. The model may only return the structured problem list: it is
     validated here and never reaches the child as text. Two independent passes; any problem the passes do not
     agree on is flagged for the parent to check."""
     configured = True
-
-    def __init__(self, key: str, model: str, post: Callable | None = None) -> None:
-        self.key, self.model = key, model
-        if post is None:
-            import httpx
-            post = httpx.post
-        self._post = post
+    provider = ""
 
     def _pass(self, media_type: str, data: str) -> tuple[list[dict], int]:
-        r = self._post(ANTHROPIC_URL, timeout=40.0, headers={
-            "x-api-key": self.key, "anthropic-version": "2023-06-01", "content-type": "application/json"}, json={
-            "model": self.model, "max_tokens": 1500, "temperature": 0,
-            "tools": [READ_TOOL], "tool_choice": {"type": "tool", "name": "record_problems"},
-            "messages": [{"role": "user", "content": [
-                {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": data}},
-                {"type": "text", "text": READ_PROMPT}]}]})
-        r.raise_for_status()
-        block = next(b for b in r.json()["content"] if b.get("type") == "tool_use")["input"]
-        out = []
-        for p in block.get("problems", [])[:20]:
-            try:
-                a, b_, sign, conf = int(p["a"]), int(p["b"]), p["op"], float(p.get("confidence", 0.5))
-            except (KeyError, TypeError, ValueError):
-                continue
-            if sign not in ("+", "-") or not (0 <= a <= 999 and 0 <= b_ <= 999):
-                continue
-            out.append({"a": a, "b": b_, "op": sign, "confidence": max(0.0, min(1.0, conf))})
-        return out, max(0, int(block.get("other_count", 0) or 0))
+        raise NotImplementedError
 
     def extract(self, image_bytes: bytes) -> tuple[list[dict], int]:
         media = sniff_media_type(image_bytes)
@@ -136,10 +129,71 @@ class ClaudeVisionExtractor:
         return out, other1
 
 
+class ClaudeVisionExtractor(_TwoPassExtractor):
+    provider = "Claude"
+
+    def __init__(self, key: str, model: str, post: Callable | None = None) -> None:
+        self.key, self.model = key, model
+        if post is None:
+            import httpx
+            post = httpx.post
+        self._post = post
+
+    def _pass(self, media_type: str, data: str) -> tuple[list[dict], int]:
+        r = self._post(ANTHROPIC_URL, timeout=40.0, headers={
+            "x-api-key": self.key, "anthropic-version": "2023-06-01", "content-type": "application/json"}, json={
+            "model": self.model, "max_tokens": 1500, "temperature": 0,
+            "tools": [READ_TOOL], "tool_choice": {"type": "tool", "name": "record_problems"},
+            "messages": [{"role": "user", "content": [
+                {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": data}},
+                {"type": "text", "text": READ_PROMPT}]}]})
+        r.raise_for_status()
+        block = next(b for b in r.json()["content"] if b.get("type") == "tool_use")["input"]
+        return _clean(block.get("problems"), block.get("other_count"))
+
+
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+GEMINI_SCHEMA = {"type": "OBJECT", "required": ["problems", "other_count"], "properties": {
+    "problems": {"type": "ARRAY", "items": {"type": "OBJECT", "required": ["a", "b", "op", "confidence"], "properties": {
+        "a": {"type": "INTEGER"}, "b": {"type": "INTEGER"}, "op": {"type": "STRING", "enum": ["+", "-"]},
+        "confidence": {"type": "NUMBER"}}}},
+    "other_count": {"type": "INTEGER"}}}
+
+
+class GeminiVisionExtractor(_TwoPassExtractor):
+    """Google Gemini (has a free tier). JSON-schema output, same validation as Claude."""
+    provider = "Gemini"
+
+    def __init__(self, key: str, model: str, post: Callable | None = None) -> None:
+        self.key, self.model = key, model
+        if post is None:
+            import httpx
+            post = httpx.post
+        self._post = post
+
+    def _pass(self, media_type: str, data: str) -> tuple[list[dict], int]:
+        import json
+        r = self._post(GEMINI_URL.format(model=self.model), timeout=40.0,
+                       headers={"x-goog-api-key": self.key, "content-type": "application/json"}, json={
+            "contents": [{"parts": [{"inline_data": {"mime_type": media_type, "data": data}},
+                                    {"text": READ_PROMPT.replace("Call record_problems exactly once.",
+                                     "Return the problems and other_count as JSON. other_count is how many exercises "
+                                     "are not a simple 'number + or - number' sum; count only, do not describe them.")}]}],
+            "generationConfig": {"temperature": 0, "responseMimeType": "application/json",
+                                 "responseSchema": GEMINI_SCHEMA}})
+        r.raise_for_status()
+        block = json.loads(r.json()["candidates"][0]["content"]["parts"][0]["text"])
+        return _clean(block.get("problems"), block.get("other_count"))
+
+
 def get_extractor() -> VisionExtractor:
+    model = os.environ.get("TUTOR_VISION_MODEL")
+    gem = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+    if gem:
+        return GeminiVisionExtractor(gem, model or "gemini-2.5-flash")
     key = os.environ.get("ANTHROPIC_API_KEY")
     if key:
-        return ClaudeVisionExtractor(key, os.environ.get("TUTOR_VISION_MODEL", "claude-sonnet-5-5"))
+        return ClaudeVisionExtractor(key, model or "claude-sonnet-5-5")
     return NotConfiguredExtractor()
 
 

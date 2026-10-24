@@ -4,8 +4,9 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY app ./app
 COPY static ./static
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 ENV TUTOR_DB=/data/tutor.db
-RUN mkdir -p /data && useradd -r tutor && chown tutor /data
-USER tutor
+RUN useradd -r tutor && mkdir -p /data && chown tutor /data && chmod +x /usr/local/bin/docker-entrypoint.sh
 EXPOSE 8000
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Starts as root only to fix ownership of a mounted data disk, then drops to the unprivileged user.
+ENTRYPOINT ["docker-entrypoint.sh"]

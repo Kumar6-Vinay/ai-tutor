@@ -2,3 +2,5 @@ tests
 *.db
 __pycache__
 .github
+scripts
+.git

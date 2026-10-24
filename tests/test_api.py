@@ -227,3 +227,68 @@ def test_photo_vendor_failure_is_a_friendly_502(client):
     main.vision = ClaudeVisionExtractor("k", "m", post=boom)
     r = client.post("/api/worksheets/photo", content=JPEG)
     assert r.status_code == 502 and "type the problems" in r.json()["detail"]
+
+
+# ---------- Gemini reader, passcode, photo limits ----------
+def test_gemini_reader_uses_same_validation_and_two_passes(client):
+    import json
+    import app.main as main
+    from app.services.intake import GeminiVisionExtractor
+    calls = []
+
+    def fake(url, **kw):
+        calls.append((url, kw))
+        body = {"problems": [P(52, 27), P(5, 3, "*"), P(63, 38)], "other_count": 1}
+
+        class R:
+            def raise_for_status(self): ...
+            def json(self_): return {"candidates": [{"content": {"parts": [{"text": json.dumps(body)}]}}]}
+        return R()
+    main.vision = GeminiVisionExtractor("g", "gemini-2.5-flash", post=fake)
+    d = client.post("/api/worksheets/photo", content=JPEG).json()
+    assert [(i["a"], i["b"]) for i in d["items"]] == [(52, 27), (63, 38)] and d["not_read"] == 1
+    assert len(calls) == 2 and "gemini-2.5-flash:generateContent" in calls[0][0]
+    assert calls[0][1]["headers"]["x-goog-api-key"] == "g" and "key=" not in calls[0][0]   # key never in the URL
+    assert client.get("/api/health").json()["provider"] == "Gemini"
+
+
+def test_extractor_choice_from_env(monkeypatch):
+    from app.services import intake
+    for k in ("GEMINI_API_KEY", "GOOGLE_API_KEY", "ANTHROPIC_API_KEY"):
+        monkeypatch.delenv(k, raising=False)
+    assert intake.get_extractor().configured is False
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "a")
+    assert intake.get_extractor().provider == "Claude"
+    monkeypatch.setenv("GEMINI_API_KEY", "g")
+    assert intake.get_extractor().provider == "Gemini"
+
+
+def test_passcode_locks_the_api_until_unlocked(client, monkeypatch):
+    monkeypatch.setenv("TUTOR_ACCESS_CODE", "family-123")
+    h = client.get("/api/health").json()
+    assert h["locked"] is True and h["unlocked"] is False
+    assert make_child(client).status_code == 401
+    assert client.post("/api/unlock", json={"code": "wrong"}).status_code == 401
+    assert client.post("/api/unlock", json={"code": "family-123"}).status_code == 200
+    assert client.get("/api/health").json()["unlocked"] is True
+    assert make_child(client).status_code == 201
+
+
+def test_passcode_attempts_are_limited(client, monkeypatch):
+    monkeypatch.setenv("TUTOR_ACCESS_CODE", "family-123")
+    codes = [client.post("/api/unlock", json={"code": f"x{i}"}).status_code for i in range(12)]
+    assert codes[:10] == [401] * 10 and codes[10:] == [429, 429]
+    assert client.post("/api/unlock", json={"code": "family-123"}).status_code == 429   # even the right one waits
+
+
+def test_no_passcode_means_open(client):
+    assert client.get("/api/health").json()["locked"] is False
+    assert make_child(client).status_code == 201
+
+
+def test_photo_rate_limit(client):
+    import app.main as main
+    photo_client(client, {"problems": [P(52, 27)], "other_count": 0})
+    main.PHOTOS_PER_HOUR = 2
+    codes = [client.post("/api/worksheets/photo", content=JPEG).status_code for _ in range(3)]
+    assert codes == [200, 200, 429]

@@ -190,11 +190,11 @@ function setup() {
   }
   stage.innerHTML = `${guideHTML("Hi " + child.nickname + "! Ready for some maths fun? Ask a grown-up to show me today's homework.", "neutral", "", "hello")}
     <span class="grownup">👪 For the grown-up</span><h2>Today's homework</h2>
-    <div class="row" id="photoRow" hidden>
+    <div class="row" id="photoRow">
       <label class="primary camera" for="cam">📷 Take a photo of the homework</label>
       <input type="file" id="cam" accept="image/*" capture="environment" hidden>
     </div>
-    <p class="sub" id="photoNote" hidden>The photo is sent once to Claude, an AI reader, to read the numbers. It is not saved. Please check what it read.</p>
+    <p class="sub" id="photoNote">The photo is sent once to Claude, an AI reader, to read the numbers. It is not saved. Please check what it read.</p>
     <p class="sub">Or type the problems from ${esc(child.nickname)}'s sheet, for example: 52 − 27, 63 − 38, 71 − 46</p>
     <textarea id="ws" aria-label="Worksheet problems">52 - 27\n63 - 38\n71 - 46\n84 - 59\n92 - 35</textarea>
     <div class="row" style="margin-top:12px"><button class="soft" id="read">Check problems</button>
@@ -220,7 +220,14 @@ function setup() {
   $("#read").onclick = () => { unsure = new Set([...unsure].filter(k => $("#ws").value.replace(/[−–]/g, "-").replace(/\s+/g, "").includes(k.replace(/\s+/g, "")))); check(); };
 
   /* phone camera: shrink the photo in the browser, then send it for reading */
-  api("GET", "/api/health").then(h => { if (h.photo) { $("#photoRow").hidden = false; $("#photoNote").hidden = false; } }).catch(() => {});
+  let photoOn = true;
+  api("GET", "/api/health").then(h => { photoOn = !!h.photo; }).catch(() => {});
+  $("#cam").onclick = ev => {
+    if (photoOn) return;
+    ev.preventDefault();
+    $("#confirm").innerHTML = `<p class="err">Photo reading is not switched on for this copy of the app yet. Type the problems below instead. (To turn it on, start the server with ANTHROPIC_API_KEY set.)</p>`;
+  };
+  $("#photoRow label").onclick = ev => { if (!photoOn) { ev.preventDefault(); $("#cam").click(); } };
   $("#cam").onchange = async ev => {
     const f = ev.target.files[0]; if (!f) return;
     showErr(""); $("#confirm").innerHTML = `<p class="sub">📖 Tilli is reading the sheet…</p>`;

@@ -13,7 +13,13 @@
       "Bash(gh run list:*)",
       "Bash(git branch:*)"
     ],
+    "ask": [
+      "Bash(git commit:*)",
+      "Bash(git push:*)"
+    ],
     "deny": [
+      "Edit(./.env)",
+      "Edit(./.env.*)",
       "Read(./.env)",
       "Read(./.env.*)",
       "Read(./*.db)",

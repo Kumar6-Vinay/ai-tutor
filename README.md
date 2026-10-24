@@ -12,7 +12,7 @@ changes any number or fails the safety check, the original line is used.
 ```bash
 pip install -r requirements-dev.txt
 uvicorn app.main:app --reload        # http://127.0.0.1:8000
-pytest -q                            # 45 tests
+pytest -q                            # 54 tests
 ```
 
 Docker: `docker build -t tutor . && docker run -p 8000:8000 -v tutor-data:/data tutor`
@@ -46,12 +46,34 @@ tests/               engine, learner model, policy, services, HTTP API
 | GET | `/api/children/{id}/progress` | Skill states, review dates, current observations. |
 | DELETE | `/api/children/{id}/observations/{skill}/{bug}` | Parent removes an observation they think is wrong. |
 | POST | `/api/worksheets/parse` | `{text}` → items, with out-of-scope items flagged for confirmation. |
-| POST | `/api/worksheets/photo` | 501 until a vision service is connected. |
+| POST | `/api/worksheets/photo` | Raw image body (JPEG/PNG/WebP, max 5 MB) → items with per-problem confidence. 501 unless `ANTHROPIC_API_KEY` is set. |
 | POST | `/api/sessions` | `{child_id, items}` → first action. |
 | POST | `/api/sessions/{id}/input` | `{kind: digit|regroup|help|stuck|break|continue|build|number, ...}` → feedback + next action. |
 | GET | `/api/sessions/{id}/report` | Parent report. |
 
 The client never receives expected answers; it sends the child's input and renders what comes back.
+
+## Homework photo
+
+On a phone the parent taps "Take a photo of the homework". The browser shrinks the picture and sends it once to
+`/api/worksheets/photo`, which asks Claude (default `claude-sonnet-5-5`, override with `TUTOR_VISION_MODEL`) to
+fill a fixed `record_problems` tool, twice. The model never writes text the child sees. Problems the two passes
+disagree on, or that are low confidence, are marked "not sure" for the parent to check before anything starts.
+Exercises that are not simple sums are only counted, and left to the parent. Photos are not stored.
+
+```bash
+export ANTHROPIC_API_KEY=...   # enables the camera button
+```
+
+## How the tutor makes sure the homework is learned
+
+- Every problem on the sheet is worked on screen with Tilli. Nothing is quietly handed back to paper.
+- Each skill on the sheet gets its own block, easiest first: Tilli shows one, then the child does the rest.
+- A problem that needed real help or a wrong try comes back once, a few steps later.
+- Each skill ends with a brand-new problem (not on the sheet) the child must do alone. If they can't,
+  Tilli shows another and checks again.
+- If time runs out (15 min for ages 5-7), unreached problems are listed as "saved for next time" in the parent report.
+- The parent report shows each homework problem as: solved alone, solved with help, watched, or saved.
 
 ## Optional LLM wording
 
@@ -60,7 +82,7 @@ Unset, the template text is used. Timeouts and errors fall back to the template.
 
 ## Not built yet
 
-- Photo reading (vision model behind `VisionExtractor`, with the confirm step already in place).
+- Exercises other than 2-digit adding/subtracting (word-only sums, shapes, times tables).
 - Speech input; speech output uses the browser voice only.
 - Parent login and accounts. The child id is kept in the browser; there is no authentication, so do not deploy publicly as is.
 - Session rows keep start and screen timestamps for the session-length cap; per-answer times are not written to the learner record.

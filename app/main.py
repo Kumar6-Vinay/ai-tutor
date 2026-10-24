@@ -6,7 +6,8 @@ import re
 from pathlib import Path
 from typing import Literal, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
@@ -25,6 +26,7 @@ STATIC = Path(__file__).resolve().parent.parent / "static"
 app = FastAPI(title="Class 1-3 Maths Tutor API", version="0.1.0")
 store = Store(os.environ.get("TUTOR_DB", "tutor.db"))
 phraser = get_phraser()
+vision = intake.get_extractor()
 
 
 # ---------- schemas ----------
@@ -104,7 +106,7 @@ def _view(s: Session) -> dict:
 # ---------- routes ----------
 @app.get("/api/health")
 def health() -> dict:
-    return {"ok": True}
+    return {"ok": True, "photo": getattr(vision, "configured", True)}
 
 
 @app.post("/api/children", status_code=201)
@@ -152,8 +154,24 @@ def parse_worksheet(body: ParseIn) -> dict:
 
 
 @app.post("/api/worksheets/photo")
-def parse_photo() -> dict:
-    raise HTTPException(501, "Photo reading is not connected yet. Type the problems instead.")
+async def parse_photo(request: Request) -> dict:
+    """Body is the raw image. The photo is read once and never stored."""
+    if not getattr(vision, "configured", True):
+        raise HTTPException(501, "Photo reading is not connected yet. Type the problems instead.")
+    data = await request.body()
+    if not data:
+        raise HTTPException(400, "No photo received")
+    if len(data) > intake.MAX_IMAGE_BYTES:
+        raise HTTPException(413, "That photo is too big. Try again a bit further away.")
+    try:
+        raw, not_read = await run_in_threadpool(vision.extract, data)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    except Exception:
+        raise HTTPException(502, "Could not read the photo. Try again in good light, or type the problems.")
+    items = intake.to_items(raw)
+    return {"items": items, "needs_confirmation": intake.needs_confirmation(items),
+            "not_read": not_read}
 
 
 @app.post("/api/sessions", status_code=201)

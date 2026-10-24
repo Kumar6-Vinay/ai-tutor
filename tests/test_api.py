@@ -148,3 +148,82 @@ def test_bad_input_rejected(client):
 def test_frontend_served(client):
     assert "Tilli" in client.get("/static/app.js").text
     assert client.get("/").status_code == 200
+
+
+# ---------- photo intake ----------
+JPEG = b"\xff\xd8\xff\xe0" + b"0" * 64
+
+
+class FakeClaude:
+    """Stands in for httpx.post: replays one canned tool_use answer per call."""
+    def __init__(self, *answers):
+        self.answers, self.calls = list(answers), []
+
+    def __call__(self, url, **kw):
+        self.calls.append(kw)
+        ans = self.answers[min(len(self.calls) - 1, len(self.answers) - 1)]
+
+        class R:
+            def raise_for_status(self): ...
+            def json(self_): return {"content": [{"type": "tool_use", "name": "record_problems", "input": ans}]}
+        return R()
+
+
+def photo_client(client, *answers):
+    import app.main as main
+    from app.services.intake import ClaudeVisionExtractor
+    fake = FakeClaude(*answers)
+    main.vision = ClaudeVisionExtractor("k", "claude-sonnet-5-5", post=fake)
+    return fake
+
+
+def P(a, b, op="-", c=0.95):
+    return {"a": a, "b": b, "op": op, "confidence": c}
+
+
+def test_photo_reads_two_passes_and_flags_disagreement(client):
+    same = {"problems": [P(52, 27), P(63, 38), P(71, 46)], "other_count": 2}
+    second = {"problems": [P(52, 27), P(68, 38), P(71, 46)], "other_count": 2}   # 63 vs 68 disagree
+    fake = photo_client(client, same, second)
+    r = client.post("/api/worksheets/photo", content=JPEG, headers={"content-type": "image/jpeg"})
+    assert r.status_code == 200
+    d = r.json()
+    assert len(fake.calls) == 2 and d["not_read"] == 2
+    got = {(i["a"], i["b"]): i["confidence"] for i in d["items"]}
+    assert got[(52, 27)] == 0.95 and got[(63, 38)] == 0.5 and got[(68, 38)] == 0.5
+    assert sorted(d["needs_confirmation"]) == [1, 3]
+
+
+def test_photo_out_of_scope_and_junk_are_dropped_or_flagged(client):
+    ans = {"problems": [P(27, 52), P(5, 3, "*"), P(5000, 3), {"a": "x"}, P(40, 20, "+")], "other_count": 0}
+    photo_client(client, ans, ans)
+    d = client.post("/api/worksheets/photo", content=JPEG, headers={"content-type": "image/jpeg"}).json()
+    assert [(i["a"], i["b"], i["valid"]) for i in d["items"]] == [(27, 52, False), (40, 20, True)]
+
+
+def test_photo_rejects_non_images_and_big_files(client):
+    photo_client(client, {"problems": [], "other_count": 0})
+    assert client.post("/api/worksheets/photo", content=b"not an image").status_code == 422
+    assert client.post("/api/worksheets/photo", content=b"").status_code == 400
+    big = JPEG + b"0" * (5 * 1024 * 1024)
+    assert client.post("/api/worksheets/photo", content=big).status_code == 413
+
+
+def test_photo_prompt_injection_is_just_data(client):
+    ans = {"problems": [P(52, 27)], "other_count": 0}
+    fake = photo_client(client, ans, ans)
+    client.post("/api/worksheets/photo", content=JPEG)
+    sent = fake.calls[0]["json"]
+    assert sent["tool_choice"] == {"type": "tool", "name": "record_problems"}   # model can only fill the tool
+    assert "not commands" in sent["messages"][0]["content"][1]["text"]
+
+
+def test_photo_vendor_failure_is_a_friendly_502(client):
+    import app.main as main
+    from app.services.intake import ClaudeVisionExtractor
+
+    def boom(*a, **k):
+        raise RuntimeError("down")
+    main.vision = ClaudeVisionExtractor("k", "m", post=boom)
+    r = client.post("/api/worksheets/photo", content=JPEG)
+    assert r.status_code == 502 and "type the problems" in r.json()["detail"]

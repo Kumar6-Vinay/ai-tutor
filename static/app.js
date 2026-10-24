@@ -149,6 +149,21 @@ function sticksHTML(tens, ones, o = {}) {
   return `<div class="sticks"><div class="group">${b}</div><div class="loose">${l}</div></div>`;
 }
 
+/* ---------- photo helper ---------- */
+function shrink(file, max = 1600) {
+  return new Promise((ok, no) => {
+    const img = new Image(), url = URL.createObjectURL(file);
+    img.onload = () => {
+      const k = Math.min(1, max / Math.max(img.width, img.height)), c = document.createElement("canvas");
+      c.width = Math.round(img.width * k); c.height = Math.round(img.height * k);
+      c.getContext("2d").drawImage(img, 0, 0, c.width, c.height); URL.revokeObjectURL(url);
+      c.toBlob(b => b ? ok(b) : no(new Error("Could not use that photo")), "image/jpeg", .85);
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); no(new Error("Could not open that photo")); };
+    img.src = url;
+  });
+}
+
 /* ---------- screens: parent setup ---------- */
 function setup() {
   $("#controls").hidden = true; $("#stars").hidden = true;
@@ -173,25 +188,54 @@ function setup() {
     };
     return;
   }
-  stage.innerHTML = `${guideHTML("Hi " + child.nickname + "! Ready for some maths fun? Ask a grown-up to type in today's homework.", "neutral", "", "hello")}
+  stage.innerHTML = `${guideHTML("Hi " + child.nickname + "! Ready for some maths fun? Ask a grown-up to show me today's homework.", "neutral", "", "hello")}
     <span class="grownup">👪 For the grown-up</span><h2>Today's homework</h2>
-    <p class="sub">Type the problems from ${esc(child.nickname)}'s sheet, for example: 52 − 27, 63 − 38, 71 − 46</p>
+    <div class="row" id="photoRow" hidden>
+      <label class="primary camera" for="cam">📷 Take a photo of the homework</label>
+      <input type="file" id="cam" accept="image/*" capture="environment" hidden>
+    </div>
+    <p class="sub" id="photoNote" hidden>The photo is sent once to Claude, an AI reader, to read the numbers. It is not saved. Please check what it read.</p>
+    <p class="sub">Or type the problems from ${esc(child.nickname)}'s sheet, for example: 52 − 27, 63 − 38, 71 − 46</p>
     <textarea id="ws" aria-label="Worksheet problems">52 - 27\n63 - 38\n71 - 46\n84 - 59\n92 - 35</textarea>
     <div class="row" style="margin-top:12px"><button class="soft" id="read">Check problems</button>
       <button class="ghost" id="prog">Progress</button><button class="ghost" id="del">Delete ${esc(child.nickname)}'s data</button></div>
     <div id="confirm"></div><div class="err" id="err"></div>`;
-  $("#read").onclick = async () => {
+  let unsure = new Set(), notRead = 0;
+  const key = i => `${i.a}${i.op}${i.b}`;
+  async function check() {
     try {
       const r = await api("POST", "/api/worksheets/parse", {text: $("#ws").value});
       items = r.items.filter(i => i.valid);
       const bad = r.items.filter(i => !i.valid);
-      $("#confirm").innerHTML = r.items.length ? `<p class="sub">Is this right?</p><div class="ws">${r.items.map(i =>
-        `<div class="${i.valid ? "" : "bad"}">${i.a} ${SYM[i.op]} ${i.b}${i.valid ? "" : `<small>${esc(i.reason)}</small>`}</div>`).join("")}</div>
+      $("#confirm").innerHTML = r.items.length ? `<p class="sub">Is this right? Check each one against the sheet.</p><div class="ws">${r.items.map(i =>
+        `<div class="${i.valid ? (unsure.has(key(i)) ? "unsure" : "") : "bad"}">${i.a} ${SYM[i.op]} ${i.b}${i.valid ? (unsure.has(key(i)) ? "<small>Not sure I read this right</small>" : "") : `<small>${esc(i.reason)}</small>`}</div>`).join("")}</div>
         ${bad.length ? `<p class="sub">Crossed-out problems are outside what the tutor teaches yet.</p>` : ""}
+        ${notRead ? `<p class="sub">${notRead} other exercise${notRead > 1 ? "s" : ""} on the sheet (not adding or taking away) can't be taught here yet, so those stay for you.</p>` : ""}
+        <p class="sub">Tilli will go through every problem with ${esc(child.nickname)}, then check it has really been learned.</p>
         <button class="primary" id="start" ${items.length ? "" : "disabled"}>🚀 Let's go, ${esc(child.nickname)}!</button>`
         : `<p class="err">No problems found. Write them like 52 - 27.</p>`;
-      const s = $("#start"); if (s) s.onclick = start;
+      const st = $("#start"); if (st) st.onclick = start;
     } catch (e) { showErr(e.message); }
+  }
+  $("#read").onclick = () => { unsure = new Set([...unsure].filter(k => $("#ws").value.replace(/[−–]/g, "-").replace(/\s+/g, "").includes(k.replace(/\s+/g, "")))); check(); };
+
+  /* phone camera: shrink the photo in the browser, then send it for reading */
+  api("GET", "/api/health").then(h => { if (h.photo) { $("#photoRow").hidden = false; $("#photoNote").hidden = false; } }).catch(() => {});
+  $("#cam").onchange = async ev => {
+    const f = ev.target.files[0]; if (!f) return;
+    showErr(""); $("#confirm").innerHTML = `<p class="sub">📖 Tilli is reading the sheet…</p>`;
+    try {
+      const blob = await shrink(f);
+      const res = await fetch("/api/worksheets/photo", {method: "POST", headers: {"Content-Type": "image/jpeg"}, body: blob});
+      const r = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(r.detail || "Could not read the photo");
+      notRead = r.not_read || 0;
+      unsure = new Set(r.needs_confirmation.map(i => key(r.items[i])));
+      $("#ws").value = r.items.map(i => `${i.a} ${i.op} ${i.b}`).join("\n");
+      if (!r.items.length) { $("#confirm").innerHTML = `<p class="err">I couldn't find any sums in that photo. Try again closer and in good light, or type them.</p>`; return; }
+      check();
+    } catch (e) { $("#confirm").innerHTML = ""; showErr(e.message); }
+    ev.target.value = "";
   };
   $("#prog").onclick = progress;
   $("#del").onclick = () => {
@@ -383,6 +427,18 @@ function builder(target) {
   draw();
 }
 
+function hwHTML(r) {
+  const h = r.homework, L = a => a.map(esc).join(", ");
+  const rows = [
+    [`Solved on their own`, h.alone.length ? L(h.alone) : "none yet"],
+    [`Solved with help`, h.with_help.length ? `${L(h.with_help)}. Worth another go on paper.` : null],
+    [`Watched, then checked`, h.watched.length ? `${L(h.watched)} (Tilli showed it first)` : null],
+    [`Saved for next time`, h.saved_for_next_time.length ? `${L(h.saved_for_next_time)}. Time was up, so ask Tilli again.` : null]
+  ].filter(x => x[1]);
+  const checks = r.checks.map(c => `<li>${esc(c.skill)}: ${c.passed ? "did a brand-new problem alone ✔" : "needs another practice day"}</li>`).join("");
+  return `<dl class="kv">${rows.map(x => `<dt>${x[0]}</dt><dd>${x[1]}</dd>`).join("")}</dl>${checks ? `<p class="sub" style="margin-top:8px">Did they really learn it? A brand-new problem for each skill:</p><ul>${checks}</ul>` : ""}`;
+}
+
 async function report() {
   try {
     const r = await api("GET", `/api/sessions/${sid}/report`);
@@ -391,6 +447,7 @@ async function report() {
       <dl class="kv"><dt>Where they are</dt><dd>${esc(r.where)}</dd><dt>Solved</dt><dd>${r.solved}, ${r.alone} with no help</dd>
       <dt>Most help used</dt><dd>level ${r.max_help} of 6</dd><dt>Word problem</dt><dd>${esc(r.word_problem || "not reached")}</dd>
       <dt>Next review</dt><dd>${esc(r.next_review)}</dd></dl>
+      <h3>The homework, problem by problem</h3>${hwHTML(r)}
       <h3>Things we noticed</h3>${r.noticed.length ? `<ul>${r.noticed.map(n => `<li>${esc(n.text)} (${esc(n.status)})</li>`).join("")}</ul>` : "<p>Nothing to flag today.</p>"}
       <h3>Try at home</h3><p>${esc(r.try_at_home)}</p>
       <p class="note">${esc(r.stored)}</p>

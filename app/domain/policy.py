@@ -16,9 +16,10 @@ from .learner_model import Evidence, Kind, LearnerModel, State
 from .maths_engine import BUG_TEXT, Bug, ColumnProblem, Op, Step, check_whole_answer
 
 SESSION_CAP_MIN = {"5-7": 15, "8-10": 25}
-SOLO_TARGET = 2          # independent items needed before transfer
-MAX_PRACTICE = 4
-MAX_HANDBACK = 2
+# Every problem on the homework is worked on screen. Skills are taught easiest first; a problem that needed
+# real help comes back once later; a fresh problem per skill checks the child can do it alone.
+SKILL_ORDER = ["add_no_carry", "sub_no_regroup", "add_carry", "sub_regroup"]
+STRUGGLE_HELP = 2        # help level at which a problem counts as "not yet learned"
 
 TRY_AT_HOME = {
     "sub_regroup": "Use 5 bundles of 10 sticks. Ask {name} to take away 17 and show you how.",
@@ -70,6 +71,8 @@ class Session:
             "id": uuid.uuid4().hex, "child_id": child["id"], "name": child["nickname"],
             "age_band": child.get("age_band", "5-7"), "target": target,
             "started": time.time(), "queue": plan, "current": None, "action_no": 0,
+            "skills": [k for k in SKILL_ORDER if k in skills], "carry": [], "checks": {},
+            "used_bank": [[x["a"], x["b"]] for x in plan if x.get("mode") in ("check", "review")],
             "signals": 0, "wrong_run": 0, "extra_done": False, "paused": None,
             "results": [], "bugs": [], "diag": {}, "worksheet": probs, "ended": False,
         }
@@ -78,42 +81,53 @@ class Session:
         return s
 
     @staticmethod
+    def _fresh(skill: str, worksheet: list[dict], used: list) -> Optional[tuple[int, int]]:
+        """A reviewed bank item that is neither on the homework nor already used this session."""
+        seen = {(p["a"], p["b"]) for p in worksheet} | {tuple(u) for u in used}
+        return next((ab for ab in ITEM_BANK.get(skill, []) if ab not in seen), None)
+
+    @staticmethod
     def _plan(child: dict, target: str, probs: list[dict], learner: LearnerModel, today: date) -> list[dict]:
         plan: list[dict] = []
+        groups: dict[str, list[dict]] = {}
+        for p in probs:
+            groups.setdefault(skill_for(p["a"], p["b"], Op(p["op"])), []).append(p)
+        skills = [k for k in SKILL_ORDER if k in groups]
         # 1. Due reviews first (at most two), from the item bank.
         for sk in learner.due_reviews(today)[:2]:
             if sk in ITEM_BANK:
                 a, b = ITEM_BANK[sk][0]
                 op = "-" if sk.startswith("sub") else "+"
                 plan.append({"type": "column", "mode": "review", "a": a, "b": b, "op": op})
-        # 2. Prerequisite check.
-        tstate = learner.state(target, today)
+        # 2. Prerequisite checks.
+        new = lambda sk: learner.state(sk, today) in (State.NOT_SEEN, State.INTRODUCED)
         if learner.state("place_value_100", today) not in (State.INDEPENDENT, State.SECURE):
             plan.append({"type": "diagnostic_build", "target": PLACE_VALUE_PROBES[0]})
             plan.append({"type": "diagnostic_build", "target": PLACE_VALUE_PROBES[2]})
-        if target.startswith("sub") and tstate in (State.NOT_SEEN, State.INTRODUCED):
+        if any(k.startswith("sub") and new(k) for k in skills):
             plan.append({"type": "diagnostic_fact", "a": 40, "b": 20, "op": "-"})
-        if target.startswith("add") and tstate in (State.NOT_SEEN, State.INTRODUCED):
+        if any(k.startswith("add") and new(k) for k in skills):
             plan.append({"type": "diagnostic_fact", "a": 30, "b": 20, "op": "+"})
-        # 3. Teach if not yet independent: model the first item, guided completion on the second.
-        rest = list(probs)
-        if tstate in (State.NOT_SEEN, State.INTRODUCED, State.SUPPORTED, State.DUE_FOR_REVIEW):
-            first = rest.pop(0)
-            plan.append({"type": "model", **first})
-            if rest:
-                plan.append({"type": "column", "mode": "completion", **rest.pop(0)})
-        # 4. Practice from the worksheet.
-        practice = rest[:MAX_PRACTICE]
-        rest = rest[MAX_PRACTICE:]
-        for p in practice:
-            plan.append({"type": "column", "mode": "practice", **p})
-        # 5. Transfer, 6. hand back, 7. summary.
-        if target in WORD_PROBLEMS:
-            wp = WORD_PROBLEMS[target][0]
-            plan.append({"type": "word_problem", "text": wp["text"], "a": wp["a"], "b": wp["b"],
-                         "op": "-" if target.startswith("sub") else "+"})
-        if rest:
-            plan.append({"type": "handback", "items": rest[:MAX_HANDBACK]})
+        # 3. One block per skill in the homework, easiest first: teach if needed, then every problem.
+        for sk in skills:
+            rest = list(groups[sk])
+            if learner.state(sk, today) in (State.NOT_SEEN, State.INTRODUCED, State.SUPPORTED, State.DUE_FOR_REVIEW):
+                plan.append({"type": "model", **rest.pop(0)})
+                if rest:
+                    plan.append({"type": "column", "mode": "completion", **rest.pop(0)})
+            for p in rest:
+                plan.append({"type": "column", "mode": "practice", **p})
+            # Transfer: the same skill in a story.
+            if sk in WORD_PROBLEMS:
+                wp = WORD_PROBLEMS[sk][0]
+                plan.append({"type": "word_problem", "text": wp["text"], "a": wp["a"], "b": wp["b"],
+                             "op": "-" if sk.startswith("sub") else "+"})
+        # 4. Check: a fresh problem per skill, done alone.
+        for sk in skills:
+            ab = Session._fresh(sk, probs, [])
+            if ab:
+                plan.append({"type": "column", "mode": "check", "a": ab[0], "b": ab[1],
+                             "op": "-" if sk.startswith("sub") else "+"})
         plan.append({"type": "summary"})
         return plan
 
@@ -137,8 +151,12 @@ class Session:
         q = self.d["queue"]
         cap = SESSION_CAP_MIN.get(self.d["age_band"], 15)
         if self._elapsed_min() > cap:
-            # Stop rule: keep only hand-back and summary.
-            self.d["queue"] = q = [a for a in q if a["type"] in ("handback", "summary")]
+            # Stop rule: problems not reached are saved for next time, never silently dropped.
+            carry = [{"a": a["a"], "b": a["b"], "op": a["op"]} for a in q
+                     if a["type"] == "column" and a.get("mode") in ("practice", "completion")]
+            if carry:
+                self.d["carry"] = self.d.get("carry", []) + carry
+            self.d["queue"] = q = ([{"type": "handback", "items": carry}] if carry else []) + [{"type": "summary"}]
         nxt = q.pop(0) if q else {"type": "summary"}
         nxt = dict(nxt)
         nxt["no"] = self.d["action_no"] = self.d["action_no"] + 1
@@ -182,12 +200,15 @@ class Session:
             p = self._problem()
             out.update(mode=c["mode"], problem=p.to_view(), help_level=c["help"],
                        title={"completion": "Your turn, with a head start", "practice": "Your turn",
-                              "review": "Quick review", "extra": "A fresh one"}[c["mode"]],
+                              "review": "Quick review", "extra": "A fresh one",
+                              "retry": "Let's try it again", "check": "Show what you know"}[c["mode"]],
                        say={"completion": ("I opened a ten for you. Now finish it." if p.op == Op.SUB and p.regrouped
                                            else "Finish this one with me."),
                             "practice": "Solve this one. Start with the ones.",
                             "review": "Do you remember this from last time?",
-                            "extra": "Let's try a new one, just like the last."}[c["mode"]],
+                            "extra": "Let's try a new one, just like the last.",
+                            "retry": "This one was tricky. Let's try it again, you can do it!",
+                            "check": "Now try a brand new one all by yourself. You've got this!"}[c["mode"]],
                        regroup_label="Open a ten" if p.op == Op.SUB else "Carry a ten")
         elif t == "diagnostic_build":
             out.update(target=c["target"], title=f"Make {c['target']}",
@@ -205,7 +226,7 @@ class Session:
         elif t == "word_problem":
             out.update(title="A story", say=c["text"].format(name=self.d["name"]))
         elif t == "handback":
-            out.update(title="Your turn on paper", say="You can do these on your sheet now.",
+            out.update(title="Saved for next time", say="We will learn these together next time. You worked hard today!",
                        items=[f"{i['a']} {sym(Op(i['op']))} {i['b']}" for i in c["items"]])
         elif t == "pause":
             out.update(title="Break time", say="Stretch and have some water. Your work is saved.")
@@ -214,7 +235,7 @@ class Session:
             done = [r for r in self.d["results"] if r["type"] == "column"]
             alone = [r for r in done if r["help"] == 0 and r["wrong"] == 0]
             out.update(title="Today you learned", say=f"{sk.child_name}.",
-                       chips=[SKILLS["place_value_100"].child_name, sk.child_name],
+                       chips=[SKILLS["place_value_100"].child_name] + [SKILLS[k].child_name for k in self.d.get("skills") or [self.d["target"]]],
                        solved=len(done), alone=len(alone))
         return out
 
@@ -280,6 +301,7 @@ class Session:
             return {"feedback": self._fb(text if ok else "Tens work like ones. We will use this soon.", "good" if ok else "hint")}
         if t == "model" and kind == "continue":
             learner.mark_introduced(skill_for(c["a"], c["b"], Op(c["op"])))
+            self.d.setdefault("watched", []).append(f"{c['a']}{sym(Op(c['op']))}{c['b']}")
             self._advance()
             return {"feedback": None}
         if t == "word_problem" and kind == "number":
@@ -372,27 +394,35 @@ class Session:
             learner.update(Evidence(skill=skill, item=item, correct=True, kind=Kind.REPRESENTATION,
                                     day=today.isoformat()), today)
         self.d["results"].append({"type": "column", "item": item, "mode": mode, "help": help_used,
-                                  "wrong": c["wrong"]})
+                                  "wrong": c["wrong"], "skill": skill})
         alone = help_used == 0 and first_try
         text = f"{p.a} {sym(p.op)} {p.b} = {p.answer}. " + ("You did it on your own." if alone else "You got there.")
+        q = self.d["queue"]
         # After heavy help, always one fresh similar item before moving on (section 8.7).
         if c["help"] >= 5 and not self.d["extra_done"] and skill in ITEM_BANK:
-            self.d["extra_done"] = True
-            a, b = ITEM_BANK[skill][0]
-            self.d["queue"].insert(0, {"type": "column", "mode": "extra", "a": a, "b": b, "op": p.op.value})
-        # Stop practising once enough solo successes; spare worksheet items go to hand-back.
-        solo = [r for r in self.d["results"] if r["type"] == "column" and r["mode"] == "practice"
-                and r["help"] == 0 and r["wrong"] == 0]
-        if len(solo) >= SOLO_TARGET:
-            left = [a for a in self.d["queue"] if a["type"] == "column" and a["mode"] == "practice"]
-            if left:
-                self.d["queue"] = [a for a in self.d["queue"] if a not in left]
-                hb = next((a for a in self.d["queue"] if a["type"] == "handback"), None)
-                items = [{"a": a["a"], "b": a["b"], "op": a["op"]} for a in left]
-                if hb:
-                    hb["items"] = (items + hb["items"])[:MAX_HANDBACK]
-                else:
-                    self.d["queue"].insert(len(self.d["queue"]) - 1, {"type": "handback", "items": items[:MAX_HANDBACK]})
+            ab = self._fresh(skill, self.d["worksheet"], self.d["used_bank"])
+            if ab:
+                self.d["extra_done"] = True
+                self.d["used_bank"].append(list(ab))
+                q.insert(0, {"type": "column", "mode": "extra", "a": ab[0], "b": ab[1], "op": p.op.value})
+        # A homework problem that needed real help comes back once, a few steps later.
+        if mode in ("practice", "completion") and (c["wrong"] > 0 or c["help"] >= STRUGGLE_HELP):
+            q.insert(min(2, max(0, len(q) - 1)), {"type": "column", "mode": "retry", "a": p.a, "b": p.b, "op": p.op.value})
+        # The fresh check: if it was not done alone, teach it once more and check again.
+        if mode == "check":
+            self.d["checks"][skill] = alone
+            if not alone and skill not in self.d.get("reteach", []):
+                ab1 = self._fresh(skill, self.d["worksheet"], self.d["used_bank"])
+                if ab1:
+                    self.d["used_bank"].append(list(ab1))
+                    ab2 = self._fresh(skill, self.d["worksheet"], self.d["used_bank"])
+                    self.d.setdefault("reteach", []).append(skill)
+                    again = [{"type": "model", "a": ab1[0], "b": ab1[1], "op": p.op.value}]
+                    if ab2:
+                        self.d["used_bank"].append(list(ab2))
+                        again.append({"type": "column", "mode": "check", "a": ab2[0], "b": ab2[1], "op": p.op.value})
+                    q[:0] = again
+                    text += " Let's look at one more together, then you try again."
         self._advance()
         return {"feedback": self._fb(text, "good"), "completed": True}
 
@@ -474,6 +504,21 @@ class Session:
                                            else "seen once, may be a slip")})
         nxt = rec.next_review if rec and rec.next_review else (today + timedelta(days=2)).isoformat()
         minutes = max(1, round(self._elapsed_min()))
+        sheet = [f"{w['a']}{sym(Op(w['op']))}{w['b']}" for w in self.d["worksheet"]]
+        carried = [f"{w['a']}{sym(Op(w['op']))}{w['b']}" for w in self.d.get("carry", [])]
+        by_item: dict[str, bool] = {}
+        for r in cols:
+            if r["item"] in sheet and r["mode"] in ("practice", "completion", "retry"):
+                by_item[r["item"]] = by_item.get(r["item"], False) or (r["help"] == 0 and r["wrong"] == 0)
+        homework = {
+            "total": len(sheet),
+            "alone": [i for i in sheet if by_item.get(i)],
+            "with_help": [i for i in sheet if i in by_item and not by_item[i]],
+            "watched": [i for i in self.d.get("watched", []) if i not in by_item],
+            "saved_for_next_time": carried,
+        }
+        checks = [{"skill": SKILLS[k].name, "passed": ok} for k, ok in self.d.get("checks", {}).items()]
+        skills = self.d.get("skills") or [target]
         return {
             "date": today.isoformat(), "minutes": minutes, "skill": SKILLS[target].name, "name": self.d["name"],
             "where": STATE_PLAIN[state], "state": state.value,
@@ -484,7 +529,9 @@ class Session:
                                                     else "solved after a hint")),
             "place_value": self.d["diag"].get("build"),
             "noticed": noticed,
-            "try_at_home": TRY_AT_HOME[target].format(name=self.d["name"]),
+            "try_at_home": " ".join(TRY_AT_HOME[k].format(name=self.d["name"]) for k in skills),
+            "homework": homework, "checks": checks,
+            "skills": [{"name": SKILLS[k].name, "where": STATE_PLAIN[learner.state(k, today)]} for k in skills],
             "next_review": nxt,
             "stored": "Stored: skills, steps and help level. Not stored: voice, photos after reading, answer times or mood.",
         }

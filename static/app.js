@@ -438,6 +438,7 @@ function hwHTML(r) {
   const h = r.homework, L = a => a.map(esc).join(", ");
   const rows = [
     [`Solved on their own`, h.alone.length ? L(h.alone) : "none yet"],
+    [`Done with Tilli after her demo`, h.guided.length ? `${L(h.guided)}. Did it themselves once Tilli showed how.` : null],
     [`Solved with help`, h.with_help.length ? `${L(h.with_help)}. Worth another go on paper.` : null],
     [`Watched, then checked`, h.watched.length ? `${L(h.watched)} (Tilli showed it first)` : null],
     [`Saved for next time`, h.saved_for_next_time.length ? `${L(h.saved_for_next_time)}. Time was up, so ask Tilli again.` : null]

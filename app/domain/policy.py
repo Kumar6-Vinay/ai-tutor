@@ -112,9 +112,9 @@ class Session:
         for sk in skills:
             rest = list(groups[sk])
             if learner.state(sk, today) in (State.NOT_SEEN, State.INTRODUCED, State.SUPPORTED, State.DUE_FOR_REVIEW):
-                plan.append({"type": "model", **rest.pop(0)})
-                if rest:
-                    plan.append({"type": "column", "mode": "completion", **rest.pop(0)})
+                first = rest.pop(0)           # I show it, then you do that same problem (with a head start)
+                plan.append({"type": "model", **first})
+                plan.append({"type": "column", "mode": "completion", **first})
             for p in rest:
                 plan.append({"type": "column", "mode": "practice", **p})
             # Transfer: the same skill in a story.
@@ -506,14 +506,18 @@ class Session:
         minutes = max(1, round(self._elapsed_min()))
         sheet = [f"{w['a']}{sym(Op(w['op']))}{w['b']}" for w in self.d["worksheet"]]
         carried = [f"{w['a']}{sym(Op(w['op']))}{w['b']}" for w in self.d.get("carry", [])]
-        by_item: dict[str, bool] = {}
+        by_item: dict[str, bool] = {}     # solved alone?
+        guided: set[str] = set()          # done after Tilli's demo, with the head start and no real struggle
         for r in cols:
             if r["item"] in sheet and r["mode"] in ("practice", "completion", "retry"):
                 by_item[r["item"]] = by_item.get(r["item"], False) or (r["help"] == 0 and r["wrong"] == 0)
+                if r["mode"] == "completion" and r["wrong"] == 0 and r["help"] <= 1:
+                    guided.add(r["item"])
         homework = {
             "total": len(sheet),
             "alone": [i for i in sheet if by_item.get(i)],
-            "with_help": [i for i in sheet if i in by_item and not by_item[i]],
+            "guided": [i for i in sheet if i in guided and not by_item[i]],
+            "with_help": [i for i in sheet if i in by_item and not by_item[i] and i not in guided],
             "watched": [i for i in self.d.get("watched", []) if i not in by_item],
             "saved_for_next_time": carried,
         }

@@ -44,14 +44,14 @@ def test_new_child_full_session_order():
     types = run_perfect(s, m)
     assert types == ["diagnostic_build", "diagnostic_build", "diagnostic_fact", "model", "column:completion",
                      "column:practice", "column:practice", "column:practice", "column:practice", "column:practice",
-                     "word_problem", "column:check"]
+                     "column:practice", "word_problem", "column:check"]
     assert m.state("sub_regroup", D0) == State.INDEPENDENT
     assert m.state("place_value_100", D0) == State.INDEPENDENT
     rep = s.report(m, D0)
     assert rep["word_problem"] == "solved first time"
     hw = rep["homework"]                     # every problem on the sheet was worked, none handed back to paper
-    assert hw["total"] == 7 and len(hw["alone"]) == 5 and hw["saved_for_next_time"] == []
-    assert hw["with_help"] == ["63−38"] and hw["watched"] == ["52−27"]
+    assert hw["total"] == 7 and len(hw["alone"]) == 6 and hw["saved_for_next_time"] == []
+    assert hw["guided"] == ["52−27"] and hw["with_help"] == [] and hw["watched"] == []   # the demo problem is done by the child too
     assert rep["checks"] == [{"skill": "2-digit subtraction with regrouping", "passed": True}]
 
 
@@ -88,7 +88,7 @@ def go_to_first_practice(s, m):
 def test_bug_feedback_and_auto_help_capped_at_4():
     m = LearnerModel()
     s = Session.start(CHILD, SHEET, m, D0)
-    go_to_first_practice(s, m)                     # 71 - 46
+    go_to_first_practice(s, m)                     # 63 - 38
     r = s.respond({"kind": "digit", "value": 9}, m, D0)
     assert r["feedback"]["tone"] == "hint"
     for _ in range(6):
@@ -125,7 +125,7 @@ def test_view_hides_expected_answers():
     s = Session.start(CHILD, SHEET, m, D0)
     go_to_first_practice(s, m)
     v = s.view()
-    assert "expected" not in str(v) and v["problem"]["a"] == 71
+    assert "expected" not in str(v) and v["problem"]["a"] == 63
 
 
 # ---------- every homework problem is learned, not just handed back ----------
@@ -212,7 +212,7 @@ def test_time_cap_saves_remaining_problems_for_next_time(monkeypatch):
     advance_to(s, m, lambda c: c["type"] == "column" and c["mode"] == "practice")
     s.d["started"] -= 60 * 60                                   # an hour has passed
     solve_column(s, m)
-    assert s.cur["type"] == "handback" and len(s.cur["items"]) == 4
+    assert s.cur["type"] == "handback" and len(s.cur["items"]) == 5
     saved = [f"{i['a']}−{i['b']}" for i in s.cur["items"]]
     s.respond({"kind": "continue"}, m, D0)
     assert s.cur["type"] == "summary"

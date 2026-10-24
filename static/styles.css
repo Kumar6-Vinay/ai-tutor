@@ -199,5 +199,5 @@ select{font:inherit;color:var(--ink);background:var(--page);border:2.5px solid v
 .items{font-family:var(--display);font-weight:700;font-size:30px;display:flex;gap:24px;flex-wrap:wrap;margin:10px 0}
 #fx{position:fixed;inset:0;pointer-events:none;z-index:50;overflow:hidden}
 [hidden]{display:none!important}
-.camera{display:inline-flex;align-items:center;gap:8px;cursor:pointer}
+.camera{display:inline-flex;align-items:center;gap:8px;cursor:pointer;user-select:none;-webkit-user-select:none}
 .ws div.unsure small{color:#d6283a;font-weight:700}

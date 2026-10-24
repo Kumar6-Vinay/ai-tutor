@@ -1,18 +1,22 @@
-# Render Blueprint: New > Blueprint > pick this repo. Then fill in the two secrets marked "sync: false".
+# Render Blueprint (free tier): New > Blueprint > pick this repo. Then fill in the two secrets marked "sync: false".
+#
+# Free instances have no persistent disk: the database is wiped on every restart, redeploy and idle spin-down,
+# so a child's profile and progress start fresh then. Fine for trying the app. To keep data, change `plan` to
+# `starter` and add this under the service (about $7/month):
+#   disk:
+#     name: tutor-data
+#     mountPath: /data
+#     sizeGB: 1
 services:
   - type: web
     name: ai-tutor
     runtime: docker
-    plan: starter            # a persistent disk needs a paid plan; free instances lose the database on restart
+    plan: free
     healthCheckPath: /api/health
-    disk:
-      name: tutor-data
-      mountPath: /data
-      sizeGB: 1
     envVars:
       - key: TUTOR_DB
         value: /data/tutor.db
-      - key: GEMINI_API_KEY    # photo reading (Google AI Studio key). Leave empty to turn photos off.
+      - key: GEMINI_API_KEY    # photo reading (free Google AI Studio key). Leave empty to turn photos off.
         sync: false
       - key: TUTOR_ACCESS_CODE # family passcode. Set one before sharing the link.
         sync: false

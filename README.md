@@ -86,7 +86,9 @@ Tell parents to avoid photos showing names or faces; the app says so on the phot
 2. Fill in the two secrets: `GEMINI_API_KEY` (from Google AI Studio) and `TUTOR_ACCESS_CODE` (a family passcode).
 3. Open the https link Render gives you. Enter the passcode once per device (30 days).
 
-The disk at `/data` keeps the database, so it needs a paid instance; free instances lose data on restart.
+The blueprint uses Render's free plan: no disk, so the database resets on every restart, redeploy and idle
+spin-down (the first visit after idle also takes about a minute). To keep progress, switch to `starter` plus a disk
+(see the comment in `render.yaml`, about $7/month).
 With no `TUTOR_ACCESS_CODE` the app is open to anyone with the link: always set one before sharing it.
 There is still no parent login, only the shared passcode, and one SQLite file, so this suits a family, not a school.
 
